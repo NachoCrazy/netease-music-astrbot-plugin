@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "description": "是否开启网易云点歌",
+      "default": true
+    },
+    "api_url": {
+      "type": "string",
+      "description": "NeteaseCloudMusicApi地址（本地默认3000）",
+      "default": "http://127.0.0.1:3000"
+    }
+  }
+}

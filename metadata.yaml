@@ -1,0 +1,6 @@
+name: "netease_music_enhanced"
+author: "NachoCrazy"
+desc: "豪华网易云点歌：封面+详情+无损语音"
+version: "1.0.0"
+repo: "https://github.com/NachoCrazy/netease-music-astrbot-plugin"
+display_name: "网易云豪华点歌"
