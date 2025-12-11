@@ -26,11 +26,8 @@
 2. 解压后将文件夹放入 AstrBot 的 `data/plugins/` 目录
 3. 重启 AstrBot
 
-### 方法三：通过命令安装
-在 AstrBot 中执行以下命令：
-```
-/plugin get <本仓库的Git地址>
-```
+### 方法三：通过Astrbot后台安装
+在 AstrBot 中的后台直接复制该git去导入：
 
 ## 使用说明
 
