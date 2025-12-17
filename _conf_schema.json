@@ -1,0 +1,26 @@
+{
+  "api_url": {
+    "type": "string",
+    "label": "网易云API地址",
+    "description": "您自行部署的 NeteaseCloudMusicApi 服务地址，例如：http://127.0.0.1:3000",
+    "default": "http://127.0.0.1:3000"
+  },
+  "quality": {
+    "type": "string",
+    "label": "默认音质",
+    "description": "优先获取的音质。如果不可用，插件会自动尝试更低的音质。",
+    "default": "exhigh",
+    "options": [
+      "lossless",
+      "exhigh",
+      "higher",
+      "standard"
+    ]
+  },
+  "search_limit": {
+    "type": "int",
+    "label": "搜索结果数量",
+    "description": "每次搜索时，向用户展示的歌曲选项数量。",
+    "default": 5
+  }
+}
