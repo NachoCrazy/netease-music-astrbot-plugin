@@ -44,13 +44,15 @@ class NeteaseMusicAPI:
             data = await r.json()
             return data["songs"][0] if data.get("songs") else None
 
-    async def get_audio_url(self, song_id: int, quality: str) -> Optional[str]:
+    # 此处增加了 cookie 参数，但默认值为空，不影响原逻辑
+    async def get_audio_url(self, song_id: int, quality: str, cookie: str = "") -> Optional[str]:
         """
         Get the audio stream URL for a song with automatic quality fallback.
         """
         qualities_to_try = list(dict.fromkeys([quality, "exhigh", "higher", "standard"]))
         for q in qualities_to_try:
-            url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}"
+            # 核心修改：在 URL 中拼接 cookie
+            url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}&cookie={cookie}"
             async with self.session.get(url) as r:
                 r.raise_for_status()
                 data = await r.json()
@@ -80,6 +82,8 @@ class Main(star.Star):
         self.config.setdefault("api_url", "http://127.0.0.1:3000")
         self.config.setdefault("quality", "exhigh")
         self.config.setdefault("search_limit", 5)
+        # 仅新增这一行配置初始化
+        self.config.setdefault("cookie", "")
         
         self.waiting_users: Dict[str, Dict[str, Any]] = {}
         self.song_cache: Dict[str, List[Dict[str, Any]]] = {}
@@ -223,7 +227,8 @@ class Main(star.Star):
             if not song_details:
                 raise ValueError("无法获取歌曲详细信息。")
 
-            audio_url = await self.api.get_audio_url(song_id, self.config["quality"])
+            # 核心修改：在此处传入配置中的 cookie
+            audio_url = await self.api.get_audio_url(song_id, self.config["quality"], self.config.get("cookie", ""))
             if not audio_url:
                 await event.send(MessageChain([Plain(f"喵~ 这首歌可能需要VIP或者没有版权，暂时不能为主人播放呢...")]))
                 return
