@@ -331,9 +331,12 @@ class Main(star.Star):
 
         await event.send(MessageChain(info_components))
         
-        # Try to send as a voice message (Record component)
+        # Let OneBot download the audio instead of sending a full WAV as base64.
         try:
-            await event.send(MessageChain([Record(file=audio_url)]))
+            if event.get_platform_name() == "aiocqhttp":
+                await self._send_onebot_audio_url(event, audio_url)
+            else:
+                await event.send(MessageChain([Record(file=audio_url)]))
         except Exception as e:
             err_msg = str(e)
             if "ffmpeg" in err_msg.lower() or "not found" in err_msg.lower():
@@ -342,3 +345,18 @@ class Main(star.Star):
                 await event.send(MessageChain([Plain(f"🔊 点击播放：{audio_url}")]))
             else:
                 raise
+
+    async def _send_onebot_audio_url(self, event: AstrMessageEvent, audio_url: str):
+        """Keep full-song WAV/base64 payloads out of the OneBot WebSocket."""
+        message = [{"type": "record", "data": {"file": audio_url}}]
+        routing = {}
+        if event.get_self_id():
+            routing["self_id"] = str(event.get_self_id())
+        if event.is_private_chat():
+            await event.bot.send_private_msg(
+                user_id=int(event.get_sender_id()), message=message, **routing
+            )
+        else:
+            await event.bot.send_group_msg(
+                group_id=int(event.get_group_id()), message=message, **routing
+            )
