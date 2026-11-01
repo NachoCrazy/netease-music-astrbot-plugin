@@ -22,6 +22,13 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.api.message_components import Plain, Image, Record
 
 
+# --- 请求预算 ---
+# 旧实现整个会话共用一个 total=20：搜索、详情、封面、音源被同一份预算绑定，
+# 一次慢请求就会把其它请求一起拖垮。这里拆成逐请求预算。
+SEARCH_TIMEOUT = aiohttp.ClientTimeout(total=20)   # 搜索保留原有 20s
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)  # 详情 / 封面 / 音源
+
+
 # --- Helpers ---
 def _find_ffmpeg() -> Optional[str]:
     """
@@ -79,7 +86,7 @@ class NeteaseMusicAPI:
     async def search_songs(self, keyword: str, limit: int) -> List[Dict[str, Any]]:
         """Search for songs by keyword."""
         url = f"{self.base_url}/search?keywords={urllib.parse.quote(keyword)}&limit={limit}&type=1"
-        async with self.session.get(url) as r:
+        async with self.session.get(url, timeout=SEARCH_TIMEOUT) as r:
             r.raise_for_status()
             data = await r.json()
             return data.get("result", {}).get("songs", [])
@@ -87,7 +94,7 @@ class NeteaseMusicAPI:
     async def get_song_details(self, song_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information for a single song."""
         url = f"{self.base_url}/song/detail?ids={str(song_id)}"
-        async with self.session.get(url) as r:
+        async with self.session.get(url, timeout=REQUEST_TIMEOUT) as r:
             r.raise_for_status()
             data = await r.json()
             return data["songs"][0] if data.get("songs") else None
@@ -101,7 +108,7 @@ class NeteaseMusicAPI:
         for q in qualities_to_try:
             # 核心修改：在 URL 中拼接 cookie
             url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}&cookie={cookie}"
-            async with self.session.get(url) as r:
+            async with self.session.get(url, timeout=REQUEST_TIMEOUT) as r:
                 r.raise_for_status()
                 data = await r.json()
                 audio_info = data.get("data", [{}])[0]
@@ -113,7 +120,7 @@ class NeteaseMusicAPI:
         """Download image data from a URL."""
         if not url:
             return None
-        async with self.session.get(url) as r:
+        async with self.session.get(url, timeout=REQUEST_TIMEOUT) as r:
             if r.status == 200:
                 return await r.read()
         return None
@@ -137,7 +144,10 @@ class Main(star.Star):
         self.waiting_users: Dict[str, Dict[str, Any]] = {}
         self.song_cache: Dict[str, List[Dict[str, Any]]] = {}
         
-        self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+        # 会话不设 total 上限：每个请求带自己的预算（见 SEARCH_TIMEOUT / REQUEST_TIMEOUT）
+        self.http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_connect=10, sock_read=45)
+        )
         self.api = NeteaseMusicAPI(self.config["api_url"], self.http_session)
         
         # Ensure ffmpeg is discoverable for Record components
