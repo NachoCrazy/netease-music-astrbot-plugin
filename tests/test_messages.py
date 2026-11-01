@@ -33,7 +33,7 @@ class FailTextTests(unittest.IsolatedAsyncioTestCase):
         await self.main.http_session.close()
 
     def test_every_status_has_its_own_text(self):
-        statuses = ["trial_only", "unavailable", "paid_album", "no_copyright", "upstream_error"]
+        statuses = ["trial_only", "unblock_failed", "paid_album", "no_copyright", "upstream_error"]
         texts = [self.main._audio_fail_text(status) for status in statuses]
         self.assertEqual(5, len(set(texts)))
         for text in texts:

@@ -73,6 +73,13 @@ def _is_truncated(info: Dict[str, Any], duration_ms: int) -> bool:
     return info_time < duration_ms - max(2000, duration_ms * 0.02)
 
 
+# --- 解灰预算 ---
+# 解灰是重活（换音源、可能较慢），单独给 30s 且单次读 15s；整段取流再封顶 40s，
+# 避免"官方三档超时 + 解灰超时"叠加成几十秒静默。
+UNBLOCK_TIMEOUT = aiohttp.ClientTimeout(total=30, sock_read=15)
+AUDIO_TOTAL_BUDGET = 40
+
+
 # --- Helpers ---
 def _find_ffmpeg() -> Optional[str]:
     """
@@ -156,11 +163,24 @@ class NeteaseMusicAPI:
 
     async def get_audio_url(self, song_id: int, quality: str, cookie: str = "",
                             duration_ms: int = 0) -> AudioResult:
+        """取流入口：整段套 AUDIO_TOTAL_BUDGET 总闸，超时按上游不可用处理。"""
+        try:
+            return await asyncio.wait_for(
+                self._probe_audio(song_id, quality, cookie, duration_ms),
+                timeout=AUDIO_TOTAL_BUDGET,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("[get_audio_url] song=%s 取流总预算 %ss 用尽",
+                           song_id, AUDIO_TOTAL_BUDGET)
+            return self._audio_result(song_id, "upstream_error", {}, "budget")
+
+    async def _probe_audio(self, song_id: int, quality: str, cookie: str = "",
+                           duration_ms: int = 0) -> AudioResult:
         """
-        获取播放 URL：按音质从高到低探测，返回结构化结果。
+        获取播放 URL：官方音源优先，只有遇到试听时才用解灰(unblock)尝试补全整首。
 
         返回 AudioResult(url, status, info)，status 取值：
-        ok / trial_only / paid_album / no_copyright / upstream_error / unavailable。
+        ok / trial_only / unblock_failed / paid_album / no_copyright / upstream_error。
         试听片段与残片只做记录，绝不作为结果返回。
         """
         qualities_to_try = list(dict.fromkeys([quality, "exhigh", "higher", "standard"]))
@@ -184,6 +204,10 @@ class NeteaseMusicAPI:
                 continue
             got_response = True
             last_info = info
+            if not info.get("url") and info.get("proxyUrl"):
+                # ENABLE_PROXY 场景下 url 可能为空，真实地址在 proxyUrl
+                info = dict(info)
+                info["url"] = info["proxyUrl"]
             if not info.get("url"):
                 if info.get("fee") == 4:
                     paid_album = True
@@ -195,16 +219,45 @@ class NeteaseMusicAPI:
                 continue
             return self._audio_result(song_id, "ok", info, f"official:{q}")
 
+        # 官方三档全部请求失败（服务没起、端口错、网关拒绝）：直接判上游不可用。
+        # 绝不再发解灰请求——否则最坏要等三档超时 + 解灰超时，用户面对几十秒静默。
+        if not got_response:
+            return self._audio_result(song_id, "upstream_error", {}, "none")
+
+        # 三档都能响应但拿不到整首 -> 解灰补全整首（官方返回的试听地址不落兜底）
+        try:
+            uurl = f"{self.base_url}/song/url/v1?id={str(song_id)}&level=exhigh&unblock=true&cookie={cookie}"
+            async with self.session.get(uurl, timeout=UNBLOCK_TIMEOUT) as r:
+                r.raise_for_status()
+                uinfo = ((await r.json()).get("data") or [{}])[0] or {}
+            if not uinfo.get("url") and uinfo.get("proxyUrl"):
+                uinfo = dict(uinfo)
+                uinfo["url"] = uinfo["proxyUrl"]
+            dt = duration_ms or _as_int(trial_info.get("dt")) or _as_int(last_info.get("dt"))
+            u_time = _as_int(uinfo.get("time"))
+            # 解灰成功判定：freeTrialInfo 为空，且（若有 time）不能明显短于 dt；
+            # 该服务端解灰成功时往往不返回 time，此时跳过 time 检查。
+            if uinfo.get("url") and not _is_trial(uinfo) and not _is_truncated(uinfo, dt):
+                uinfo = dict(uinfo)
+                # 解灰来源的 level/type 只是服务端回显（实测会给 exhigh/flac 却回 320k mp3），
+                # 卡片上标注来源，不冒充"实际音质"
+                uinfo["_card_level"] = "解灰"
+                return self._audio_result(song_id, "ok", uinfo, "unblock:exhigh")
+            logger.warning(
+                "[get_audio_url] unblock incomplete: song=%s has_url=%s time=%s dt=%s freeTrial=%s",
+                song_id, bool(uinfo.get("url")), u_time, dt, uinfo.get("freeTrialInfo"),
+            )
+        except Exception as e:
+            logger.warning("[get_audio_url] unblock failed: %s", _err_brief(e))
+
+        if paid_album:
+            return self._audio_result(song_id, "paid_album", last_info, "none")
         if trial_info:
             return self._audio_result(song_id, "trial_only", trial_info, "none")
         if no_resource:
             return self._audio_result(song_id, "no_copyright", last_info, "none")
-        if paid_album:
-            return self._audio_result(song_id, "paid_album", last_info, "none")
-        if not got_response:
-            return self._audio_result(song_id, "upstream_error", {}, "none")
-        # 接口能正常响应，但所有档位都没有可播地址
-        return self._audio_result(song_id, "unavailable", last_info, "none")
+        # 到这里说明官方接口能正常响应，只是拿不到整首（含解灰失败）
+        return self._audio_result(song_id, "unblock_failed", last_info, "none")
 
     async def download_image(self, url: str) -> Optional[bytes]:
         """Download image data from a URL."""
@@ -376,8 +429,9 @@ class Main(star.Star):
             return "呜喵……这张是付费数字专辑，主人买下来才能听喵。"
         if status == "upstream_error":
             return "呜喵……和音乐服务器的连接断掉了，连不上点歌服务喵。"
-        if status == "unavailable":
-            return "呜喵……这首歌暂时没有可用的音源，放不了喵。"
+        if status == "unblock_failed":
+            # 此时往往连试听都拿不到，不能说"只能听试听"
+            return "呜喵……这首歌的音源解不开，暂时放不了喵。"
         return "呜喵……这首歌是会员曲，只能听到试听片段，没办法完整放给主人喵。"
 
     async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int) -> str:
@@ -433,7 +487,8 @@ class Main(star.Star):
     def _format_quality(self, info: Optional[Dict[str, Any]]) -> str:
         """卡片音质：显示实际拿到的 level / 格式 / 码率，字段缺失才退回配置值并标注。"""
         info = info or {}
-        level = info.get("level") or ""
+        # 解灰来源的 level 只是服务端回显，不能当"实际音质"展示，改用 _card_level
+        level = info.get("_card_level") or info.get("level") or ""
         fmt = info.get("type") or ""
         br = _as_int(info.get("br"))
         detail = " ".join(x for x in (fmt, f"{br // 1000}k" if br else "") if x)

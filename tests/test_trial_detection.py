@@ -143,11 +143,12 @@ class AudioResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("no_copyright", result.status)
         self.assertIsNone(result.url)
 
-    async def test_unavailable_status(self):
-        """接口能正常响应、但所有档位都没有可播地址 -> unavailable。"""
-        api, _ = self.api(official=song_url_payload(url=None, code=200, fee=0))
+    async def test_unblock_failed_status(self):
+        """接口能正常响应、所有档位都没有可播地址且解灰也不可用 -> unblock_failed。"""
+        api, _ = self.api(official=song_url_payload(url=None, code=200, fee=0),
+                          unblock=RuntimeError("unblock 不可用"))
         result = await api.get_audio_url(MEMBER_ID, "exhigh", "", MEMBER_DT)
-        self.assertEqual("unavailable", result.status)
+        self.assertEqual("unblock_failed", result.status)
         self.assertIsNone(result.url)
 
     async def test_upstream_error_when_all_requests_fail(self):
@@ -177,10 +178,12 @@ class AudioResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("cookie=MUSIC_U=abc123", url)
 
     async def test_quality_fallback_order_preserved(self):
-        """仍按 quality -> exhigh -> higher -> standard 顺序探测（去重后 3 档）。"""
-        api, session = self.api(official=song_url_payload(url=None, code=200, fee=0))
+        """仍按 quality -> exhigh -> higher -> standard 顺序探测官方三档（去重后 3 档）。"""
+        api, session = self.api(official=song_url_payload(url=None, code=200, fee=0),
+                                unblock=RuntimeError("unblock 不可用"))
         await api.get_audio_url(MEMBER_ID, "exhigh", "", MEMBER_DT)
-        levels = [url.split("level=")[1].split("&")[0] for url, _ in session.calls]
+        levels = [url.split("level=")[1].split("&")[0] for url, _ in session.calls
+                  if "unblock=true" not in url]
         self.assertEqual(["exhigh", "higher", "standard"], levels)
 
 
