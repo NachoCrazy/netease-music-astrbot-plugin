@@ -14,12 +14,70 @@ import asyncio
 import shutil
 import subprocess
 import urllib.parse
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, NamedTuple
 
 from astrbot.api import star, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.api.message_components import Plain, Image, Record
+
+
+# --- 音源结果 ---
+class AudioResult(NamedTuple):
+    """音源探测结果。只有 status == "ok" 时 url 才非空，试听片段永远不会从这里流出。"""
+
+    url: Optional[str]
+    status: str
+    info: Dict[str, Any]
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    """把接口里的数字字段（int / float / 数字字符串）统一成 int，非法值给 default。"""
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _err_brief(exc: BaseException) -> str:
+    """异常摘要：只给类型与 HTTP 状态码，绝不带 URL。
+
+    请求 URL 里带 cookie（&cookie=MUSIC_U=...），而 aiohttp 的
+    ClientResponseError.__str__ 会带上完整 URL，直接打日志等于泄露用户凭据。
+    """
+    status = getattr(exc, "status", None)
+    return f"{type(exc).__name__}({status})" if status else type(exc).__name__
+
+
+def _is_trial(info: Dict[str, Any]) -> bool:
+    """freeTrialInfo 是"非空且不为字符串 null"时才视为试听片段。
+
+    空对象 {} / 空数组 [] / None / "null" 都表示可放整首，不能判成试听。
+    """
+    value = info.get("freeTrialInfo")
+    return bool(value) and value != "null"
+
+
+def _is_truncated(info: Dict[str, Any], duration_ms: int) -> bool:
+    """兜底：响应带 time 且明显短于 dt（容差 max(2s, 2%)）即为残片/试听。
+
+    服务端试听长度会在 45s/30s 之间漂移，也可能返回 freeTrialInfo 为空的残片，
+    所以即便 freeTrialInfo 为空，也不能只凭它判定为整首。
+    """
+    info_time = _as_int(info.get("time"))
+    duration_ms = _as_int(duration_ms)
+    if not duration_ms or not info_time:
+        return False
+    return info_time < duration_ms - max(2000, duration_ms * 0.02)
+
+
+# --- 解灰预算 ---
+# 解灰是重活（换音源、可能较慢），单独给 30s 且单次读 15s；整段取流再封顶 40s，
+# 避免"官方三档超时 + 解灰超时"叠加成几十秒静默。
+UNBLOCK_TIMEOUT = aiohttp.ClientTimeout(total=30, sock_read=15)
+AUDIO_TOTAL_BUDGET = 40
 
 
 # --- Helpers ---
@@ -92,22 +150,114 @@ class NeteaseMusicAPI:
             data = await r.json()
             return data["songs"][0] if data.get("songs") else None
 
-    # 此处增加了 cookie 参数，但默认值为空，不影响原逻辑
-    async def get_audio_url(self, song_id: int, quality: str, cookie: str = "") -> Optional[str]:
+    def _audio_result(self, song_id: int, status: str, info: Optional[Dict[str, Any]], src: str) -> AudioResult:
+        """统一收口：只有 status == "ok" 才带 url，其余一律 url=None。"""
+        info = info or {}
+        url = info.get("url") if status == "ok" else None
+        logger.info(
+            "[get_audio_url] song=%s status=%s level=%s type=%s time=%s freeTrial=%s src=%s",
+            song_id, status, info.get("level"), info.get("type"),
+            info.get("time"), info.get("freeTrialInfo"), src,
+        )
+        return AudioResult(url=url, status=status, info=info)
+
+    async def get_audio_url(self, song_id: int, quality: str, cookie: str = "",
+                            duration_ms: int = 0) -> AudioResult:
+        """取流入口：整段套 AUDIO_TOTAL_BUDGET 总闸，超时按上游不可用处理。"""
+        try:
+            return await asyncio.wait_for(
+                self._probe_audio(song_id, quality, cookie, duration_ms),
+                timeout=AUDIO_TOTAL_BUDGET,
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning("[get_audio_url] song=%s 取流总预算 %ss 用尽",
+                           song_id, AUDIO_TOTAL_BUDGET)
+            return self._audio_result(song_id, "upstream_error", {}, "budget")
+
+    async def _probe_audio(self, song_id: int, quality: str, cookie: str = "",
+                           duration_ms: int = 0) -> AudioResult:
         """
-        Get the audio stream URL for a song with automatic quality fallback.
+        获取播放 URL：官方音源优先，只有遇到试听时才用解灰(unblock)尝试补全整首。
+
+        返回 AudioResult(url, status, info)，status 取值：
+        ok / trial_only / unblock_failed / paid_album / no_copyright / upstream_error。
+        试听片段与残片只做记录，绝不作为结果返回。
         """
         qualities_to_try = list(dict.fromkeys([quality, "exhigh", "higher", "standard"]))
+        trial_info: Dict[str, Any] = {}
+        last_info: Dict[str, Any] = {}
+        got_response = False
+        no_resource = False
+        paid_album = False
+        duration_ms = _as_int(duration_ms)
+
         for q in qualities_to_try:
-            # 核心修改：在 URL 中拼接 cookie
+            # 在 URL 中拼接 cookie
             url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}&cookie={cookie}"
-            async with self.session.get(url) as r:
+            try:
+                async with self.session.get(url) as r:
+                    r.raise_for_status()
+                    info = ((await r.json()).get("data") or [{}])[0] or {}
+            except Exception as e:  # 单档失败不影响其它档
+                # 只记类型/状态码：异常字符串里可能带完整 URL（含 cookie）
+                logger.warning("[get_audio_url] official level=%s failed: %s", q, _err_brief(e))
+                continue
+            got_response = True
+            last_info = info
+            if not info.get("url") and info.get("proxyUrl"):
+                # ENABLE_PROXY 场景下 url 可能为空，真实地址在 proxyUrl
+                info = dict(info)
+                info["url"] = info["proxyUrl"]
+            if not info.get("url"):
+                if info.get("fee") == 4:
+                    paid_album = True
+                elif info.get("code") == 404:
+                    no_resource = True
+                continue
+            if _is_trial(info) or _is_truncated(info, duration_ms):
+                trial_info = trial_info or info
+                continue
+            return self._audio_result(song_id, "ok", info, f"official:{q}")
+
+        # 官方三档全部请求失败（服务没起、端口错、网关拒绝）：直接判上游不可用。
+        # 绝不再发解灰请求——否则最坏要等三档超时 + 解灰超时，用户面对几十秒静默。
+        if not got_response:
+            return self._audio_result(song_id, "upstream_error", {}, "none")
+
+        # 三档都能响应但拿不到整首 -> 解灰补全整首（官方返回的试听地址不落兜底）
+        try:
+            uurl = f"{self.base_url}/song/url/v1?id={str(song_id)}&level=exhigh&unblock=true&cookie={cookie}"
+            async with self.session.get(uurl, timeout=UNBLOCK_TIMEOUT) as r:
                 r.raise_for_status()
-                data = await r.json()
-                audio_info = data.get("data", [{}])[0]
-                if audio_info.get("url"):
-                    return audio_info["url"]
-        return None
+                uinfo = ((await r.json()).get("data") or [{}])[0] or {}
+            if not uinfo.get("url") and uinfo.get("proxyUrl"):
+                uinfo = dict(uinfo)
+                uinfo["url"] = uinfo["proxyUrl"]
+            dt = duration_ms or _as_int(trial_info.get("dt")) or _as_int(last_info.get("dt"))
+            u_time = _as_int(uinfo.get("time"))
+            # 解灰成功判定：freeTrialInfo 为空，且（若有 time）不能明显短于 dt；
+            # 该服务端解灰成功时往往不返回 time，此时跳过 time 检查。
+            if uinfo.get("url") and not _is_trial(uinfo) and not _is_truncated(uinfo, dt):
+                uinfo = dict(uinfo)
+                # 解灰来源的 level/type 只是服务端回显（实测会给 exhigh/flac 却回 320k mp3），
+                # 卡片上标注来源，不冒充"实际音质"
+                uinfo["_card_level"] = "解灰"
+                return self._audio_result(song_id, "ok", uinfo, "unblock:exhigh")
+            logger.warning(
+                "[get_audio_url] unblock incomplete: song=%s has_url=%s time=%s dt=%s freeTrial=%s",
+                song_id, bool(uinfo.get("url")), u_time, dt, uinfo.get("freeTrialInfo"),
+            )
+        except Exception as e:
+            logger.warning("[get_audio_url] unblock failed: %s", _err_brief(e))
+
+        if paid_album:
+            return self._audio_result(song_id, "paid_album", last_info, "none")
+        if trial_info:
+            return self._audio_result(song_id, "trial_only", trial_info, "none")
+        if no_resource:
+            return self._audio_result(song_id, "no_copyright", last_info, "none")
+        # 到这里说明官方接口能正常响应，只是拿不到整首（含解灰失败）
+        return self._audio_result(song_id, "unblock_failed", last_info, "none")
 
     async def download_image(self, url: str) -> Optional[bytes]:
         """Download image data from a URL."""
@@ -270,16 +420,30 @@ class Main(star.Star):
 
         self.waiting_users[event.get_session_id()] = {"key": cache_key, "expire": time.time() + 60}
 
-    async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int):
-        """Plays the song selected by the user."""
+    @staticmethod
+    def _audio_fail_text(status: str) -> str:
+        """按取流状态给失败文案，不再把"会员/没版权/连不上"混成一句。"""
+        if status == "no_copyright":
+            return "呜喵……这首歌没有版权，放不了喵。"
+        if status == "paid_album":
+            return "呜喵……这张是付费数字专辑，主人买下来才能听喵。"
+        if status == "upstream_error":
+            return "呜喵……和音乐服务器的连接断掉了，连不上点歌服务喵。"
+        if status == "unblock_failed":
+            # 此时往往连试听都拿不到，不能说"只能听试听"
+            return "呜喵……这首歌的音源解不开，暂时放不了喵。"
+        return "呜喵……这首歌是会员曲，只能听到试听片段，没办法完整放给主人喵。"
+
+    async def play_selected_song(self, event: AstrMessageEvent, cache_key: str, num: int) -> str:
+        """Plays the song selected by the user. 返回 "ok" 或失败状态名。"""
         if cache_key not in self.song_cache:
             await event.send(MessageChain([Plain("喵呜~ 主人选择得太久了，搜索结果已经凉掉了哦，请重新点歌吧~")]))
-            return
+            return "expired"
 
         songs = self.song_cache[cache_key]
         if not (1 <= num <= len(songs)):
              await event.send(MessageChain([Plain("主人，您输入的数字不对哦，请选择列表里的歌曲编号喵~")]))
-             return
+             return "bad_index"
              
         selected_song = songs[num - 1]
         song_id = selected_song["id"]
@@ -289,11 +453,18 @@ class Main(star.Star):
             if not song_details:
                 raise ValueError("无法获取歌曲详细信息。")
 
-            # 核心修改：在此处传入配置中的 cookie
-            audio_url = await self.api.get_audio_url(song_id, self.config["quality"], self.config.get("cookie", ""))
-            if not audio_url:
-                await event.send(MessageChain([Plain(f"喵~ 这首歌可能需要VIP或者没有版权，暂时不能为主人播放呢...")]))
-                return
+            # 传入配置中的 cookie 与歌曲真实时长（dt），用于识别试听/残片
+            audio = await self.api.get_audio_url(
+                song_id,
+                self.config["quality"],
+                self.config.get("cookie", ""),
+                song_details.get("dt", 0),
+            )
+            if audio.status != "ok" or not audio.url:
+                # 试听片段绝不发送：只按状态给文案
+                logger.info(f"[play_selected_song] song={song_id} 未放出: status={audio.status}")
+                await event.send(MessageChain([Plain(self._audio_fail_text(audio.status))]))
+                return audio.status
 
             title = song_details.get("name", "")
             artists = " / ".join(a["name"] for a in song_details.get("ar", []))
@@ -302,16 +473,31 @@ class Main(star.Star):
             duration_ms = song_details.get("dt", 0)
             dur_str = f"{duration_ms//60000}:{(duration_ms%60000)//1000:02d}"
 
-            await self._send_song_messages(event, num, title, artists, album, dur_str, cover_url, audio_url)
+            await self._send_song_messages(event, num, title, artists, album, dur_str, cover_url, audio.url, audio.info)
+            return "ok"
 
         except Exception as e:
             logger.error(f"Netease Music plugin: Failed to play song {song_id}. Error: {e!s}")
             await event.send(MessageChain([Plain(f"呜...获取歌曲信息的时候失败了喵...")]))
+            return "detail_failed"
         finally:
             if cache_key in self.song_cache:
                 del self.song_cache[cache_key]
 
-    async def _send_song_messages(self, event: AstrMessageEvent, num: int, title: str, artists: str, album: str, dur_str: str, cover_url: str, audio_url: str):
+    def _format_quality(self, info: Optional[Dict[str, Any]]) -> str:
+        """卡片音质：显示实际拿到的 level / 格式 / 码率，字段缺失才退回配置值并标注。"""
+        info = info or {}
+        # 解灰来源的 level 只是服务端回显，不能当"实际音质"展示，改用 _card_level
+        level = info.get("_card_level") or info.get("level") or ""
+        fmt = info.get("type") or ""
+        br = _as_int(info.get("br"))
+        detail = " ".join(x for x in (fmt, f"{br // 1000}k" if br else "") if x)
+        if level:
+            return f"{level} / {detail}" if detail else str(level)
+        cfg = self.config.get("quality", "")
+        return f"{cfg} (配置)" if cfg else "未知"
+
+    async def _send_song_messages(self, event: AstrMessageEvent, num: int, title: str, artists: str, album: str, dur_str: str, cover_url: str, audio_url: str, audio_info: Optional[Dict[str, Any]] = None):
         """Constructs and sends the song info and audio messages."""
         detail_text = f"""遵命，主人！为您播放第 {num} 首歌曲~
 
@@ -319,7 +505,7 @@ class Main(star.Star):
 🎤 歌手：{artists}
 💿 专辑：{album}
 ⏳ 时长：{dur_str}
-✨ 音质：{self.config['quality']}
+✨ 音质：{self._format_quality(audio_info)}
 
 请主人享用喵~
 """
