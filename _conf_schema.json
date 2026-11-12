@@ -1,38 +1,38 @@
 {
   "api_url": {
     "type": "string",
-    "label": "网易云 API 地址",
-    "description": "自行部署的 NeteaseCloudMusicApi 服务地址，例如：http://127.0.0.1:3000",
+    "description": "网易云 API 地址",
+    "hint": "自行部署的 NeteaseCloudMusicApi 服务地址，例如：http://127.0.0.1:3000",
     "default": "http://127.0.0.1:3000"
   },
   "quality": {
     "type": "string",
-    "label": "优先音质",
-    "description": "优先获取的音质（lossless / exhigh / higher / standard）。如果不可用，插件会自动尝试更低的音质。",
+    "description": "优先音质",
+    "hint": "优先获取的音质（lossless / exhigh / higher / standard）。如果不可用，插件会自动尝试更低的音质。",
     "default": "exhigh"
   },
   "search_limit": {
     "type": "int",
-    "label": "搜索结果数量",
-    "description": "每次搜索时，向用户展示的歌曲选项数量。",
+    "description": "搜索结果数量",
+    "hint": "每次搜索时，向用户展示的歌曲选项数量。",
     "default": 5
   },
   "send_cover": {
     "type": "bool",
-    "label": "发送封面图",
-    "description": "仅控制专辑封面图片，不影响歌曲文字信息或音频。关闭后不下载封面图片。",
+    "description": "发送封面图",
+    "hint": "仅控制专辑封面图片，不影响歌曲文字信息或音频。关闭后不下载封面图片。",
     "default": true
   },
   "send_song_info": {
     "type": "bool",
-    "label": "发送歌曲信息",
-    "description": "控制播放时的歌曲介绍文字（歌名、歌手、专辑、时长、音质及提示语），不影响封面图片、音频或搜索选歌列表。",
+    "description": "发送歌曲信息",
+    "hint": "控制播放时的歌曲介绍文字（歌名、歌手、专辑、时长、音质及提示语），不影响封面图片、音频或搜索选歌列表。",
     "default": true
   },
   "cookie": {
     "type": "text",
-    "label": "网易云 Cookie",
-    "description": "登录网易云网页版后，从浏览器开发者工具复制 Cookie。填写后可播放 VIP 歌曲。",
+    "description": "网易云 Cookie",
+    "hint": "登录网易云网页版后，从浏览器开发者工具复制 Cookie。填写后可播放 VIP 歌曲。",
     "default": ""
   }
 }
