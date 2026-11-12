@@ -323,13 +323,17 @@ class Main(star.Star):
 
 请主人享用喵~
 """
-        info_components = [Plain(detail_text)]
+        info_components = []
+        if self.config.get("send_song_info", True):
+            info_components.append(Plain(detail_text))
 
-        image_data = await self.api.download_image(cover_url)
-        if image_data:
-            info_components.append(Image.fromBase64(base64.b64encode(image_data).decode()))
+        if self.config.get("send_cover", True):
+            image_data = await self.api.download_image(cover_url)
+            if image_data:
+                info_components.append(Image.fromBase64(base64.b64encode(image_data).decode()))
 
-        await event.send(MessageChain(info_components))
+        if info_components:
+            await event.send(MessageChain(info_components))
         
         # Try to send as a voice message (Record component)
         try:

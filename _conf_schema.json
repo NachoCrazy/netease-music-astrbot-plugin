@@ -17,6 +17,18 @@
     "description": "每次搜索时，向用户展示的歌曲选项数量。",
     "default": 5
   },
+  "send_cover": {
+    "type": "bool",
+    "label": "发送封面图",
+    "description": "仅控制专辑封面图片，不影响歌曲文字信息或音频。关闭后不下载封面图片。",
+    "default": true
+  },
+  "send_song_info": {
+    "type": "bool",
+    "label": "发送歌曲信息",
+    "description": "控制播放时的歌曲介绍文字（歌名、歌手、专辑、时长、音质及提示语），不影响封面图片、音频或搜索选歌列表。",
+    "default": true
+  },
   "cookie": {
     "type": "text",
     "label": "网易云 Cookie",
