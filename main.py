@@ -72,6 +72,54 @@ class NeteaseMusicAPI:
     A wrapper for the NeteaseCloudMusicApi to simplify interactions.
     Encapsulates API calls for searching, getting details, and fetching audio URLs.
     """
+    QUALITY_LABELS = {
+        "standard": "标准",
+        "higher": "较高",
+        "exhigh": "极高",
+        "lossless": "无损",
+        "hires": "Hi-Res高清",
+        "jyeffect": "高清臻音",
+        "dolby": "杜比全景声",
+        "vivid": "臻音全景声",
+        "jymaster": "超清母带",
+        "sky": "沉浸环绕声",
+    }
+
+    @classmethod
+    def normalize_quality(cls, quality: str) -> str:
+        value = str(quality).strip().casefold()
+        aliases = {
+            "hi-res": "hires",
+            "hi-res 高清": "hires",
+            "高解析度无损": "hires",
+            "hq": "exhigh",
+            "sq": "lossless",
+            "spatial audio": "jyeffect",
+            "dolby atmos": "dolby",
+            "audio vivid": "vivid",
+            "master": "jymaster",
+            "surround audio": "sky",
+        }
+        if value in aliases:
+            return aliases[value]
+        for code, label in cls.QUALITY_LABELS.items():
+            if value in (code, label.casefold()):
+                return code
+        raise ValueError(f"不支持的音质：{quality}")
+
+    @classmethod
+    def quality_label(cls, quality: str) -> str:
+        return cls.QUALITY_LABELS[cls.normalize_quality(quality)]
+
+    @classmethod
+    def quality_candidates(cls, quality: str) -> List[str]:
+        selected = cls.normalize_quality(quality)
+        ordinary = ["hires", "lossless", "exhigh", "higher", "standard"]
+        if selected in ordinary:
+            return ordinary[ordinary.index(selected):]
+        # Immersive/effect formats are alternatives, not a strict quality ladder.
+        return [selected] + ordinary
+
     def __init__(self, api_url: str, session: aiohttp.ClientSession):
         self.base_url = api_url.rstrip("/")
         self.session = session
@@ -97,14 +145,16 @@ class NeteaseMusicAPI:
         """
         Get the audio stream URL for a song with automatic quality fallback.
         """
-        qualities_to_try = list(dict.fromkeys([quality, "exhigh", "higher", "standard"]))
+        qualities_to_try = self.quality_candidates(quality)
         for q in qualities_to_try:
             # 核心修改：在 URL 中拼接 cookie
             url = f"{self.base_url}/song/url/v1?id={str(song_id)}&level={q}&cookie={cookie}"
             async with self.session.get(url) as r:
+                if r.status in (400, 403, 404):
+                    continue
                 r.raise_for_status()
                 data = await r.json()
-                audio_info = data.get("data", [{}])[0]
+                audio_info = (data.get("data") or [{}])[0]
                 if audio_info.get("url"):
                     return audio_info["url"]
         return None
@@ -319,7 +369,7 @@ class Main(star.Star):
 🎤 歌手：{artists}
 💿 专辑：{album}
 ⏳ 时长：{dur_str}
-✨ 音质：{self.config['quality']}
+✨ 优先音质：{self.api.quality_label(self.config['quality'])}
 
 请主人享用喵~
 """
