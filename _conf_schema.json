@@ -7,8 +7,32 @@
   },
   "quality": {
     "type": "string",
-    "label": "优先音质",
-    "description": "优先获取的音质（lossless / exhigh / higher / standard）。如果不可用，插件会自动尝试更低的音质。",
+    "description": "优先音质",
+    "hint": "括号内采用客户端展示名称（HQ、SQ、Hi-Res、Spatial Audio、Audio Vivid、Master、Surround Audio 等），后台自动转换为 API 音质代码。kHz/bit 表示采样率/位深，kbps 表示码率，并非频率；采样率、位深和声道标注参考用户提供的规格表，不保证每首歌均达到标注值，实际以返回音源为准；杜比位深在表中未注明，较高（Higher）为表外的 API 额外档位。特殊声效不可用时尝试 Hi-Res 及以下普通音质；普通音质只向下降级。可用音质取决于歌曲与账号权限，QQ 语音可能再次转码。",
+    "options": [
+      "standard",
+      "higher",
+      "exhigh",
+      "lossless",
+      "hires",
+      "jyeffect",
+      "dolby",
+      "vivid",
+      "jymaster",
+      "sky"
+    ],
+    "labels": [
+      "标准（Standard） · 128kbps",
+      "较高（Higher） · API额外档位，通常192kbps",
+      "极高（HQ） · 320kbps",
+      "无损（SQ） · 44.1–48kHz / 16bit / 2声道",
+      "高解析度无损（Hi-Res） · 48–192kHz / 24bit / 2声道",
+      "高清臻音（Spatial Audio） · 96kHz / 24bit / 2声道",
+      "杜比全景声（Dolby Atmos） · 48kHz / 位深未注明 / 最高7.1.4声道",
+      "臻音全景声（Audio Vivid） · 44.1kHz / 16bit / 最高7.1.4声道",
+      "超清母带（Master） · 192kHz / 24bit / 2声道",
+      "沉浸环绕声（Surround Audio） · 44.1kHz / 16bit / 5.1或2声道"
+    ],
     "default": "exhigh"
   },
   "search_limit": {
